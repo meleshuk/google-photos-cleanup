@@ -1,0 +1,18 @@
+.DS_Store
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Google Takeout exports and derived reports contain private photo metadata.
+takeout-*.zip
+Takeout/
+Google Photos/
+orphan*.json
+orphan*.csv
+*.uncertain.csv
+!examples/orphans.sample.csv
+
+# Deletion journals contain private Google Photos permalinks.
+*.jsonl
+gphotos_delete_journal*
