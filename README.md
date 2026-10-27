@@ -42,8 +42,9 @@ The deleter:
 - verifies each deletion and writes an append-only resume journal;
 - never opens or empties Trash.
 
-Both scripts contain detailed design notes and guardrail rationale in their
-module documentation.
+Detailed rationale and production findings live in
+[the finder design notes](docs/finder-design.md) and
+[the deleter design notes](docs/deleter-design.md).
 
 ## Requirements
 
@@ -177,6 +178,31 @@ connection.
 python3 -m unittest discover -s tests -v
 python3 gphotos_delete_orphans.py --self-test
 ```
+
+## Code organization
+
+The original command names remain stable compatibility entry points. Their
+implementation is separated by safety boundary:
+
+```text
+gphotos_find_orphans.py          # finder CLI entry point
+gphotos_delete_orphans.py        # deleter CLI entry point
+gphotos_cleanup/
+  finder_sources.py              # Takeout paths, ZIP decoding, shared helpers
+  finder_inventory.py            # global inventory, sidecars, folder scanning
+  finder_matching.py             # logical items and orphan classification
+  finder_reporting.py            # surveys, reports, finder CLI
+  delete_shared.py               # input validation, models, durable journal
+  delete_browser.py              # browser state and click guardrails
+  delete_execution.py            # pacing, cooldowns, deletion loop
+  delete_cli.py                  # argument validation and orchestration
+  delete_selftest.py             # offline regression/guardrail suite
+docs/                            # detailed rationale and incident history
+tests/                           # synthetic end-to-end tests
+```
+
+This structure keeps browser mutation code separate from input authorization and
+resume state while preserving the existing commands and output formats.
 
 ## Project status
 
