@@ -85,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"CDP endpoint of your already-signed-in Chrome (default: {DEFAULT_CDP_URL})",
     )
     parser.add_argument(
+        "--max-tab-crash-recoveries", type=int, default=3,
+        help="maximum fresh-tab crash recoveries per run (default: 3; 0 stops on "
+             "the first crash). Crashes never trigger throttling cooldowns",
+    )
+    parser.add_argument(
         "--nav-timeout",
         type=float,
         default=30.0,
@@ -256,6 +261,8 @@ def print_summary(summary: Summary, cfg: Config, args: argparse.Namespace) -> No
         # See FAILURE KINDS and RATE LIMITING AND COOLDOWNS in the header.
         print(f"    navigation      : {summary.failed_navigation:<5} "
               f"{FAIL_NAVIGATION} - page would not load; throttling, cools down")
+        print(f"    browser crash   : {summary.failed_browser_crash:<5} "
+              f"{FAIL_BROWSER_CRASH} - renderer crashed; no throttling cooldown")
         print(f"    stacked dialog  : {summary.failed_stacked:<5} "
               f"{FAIL_STACKED} - delete dialog not answered; CODE GAP, no cooldown")
         print(f"    no dialog       : {summary.failed_no_dialog:<5} "
@@ -328,6 +335,9 @@ def print_summary(summary: Summary, cfg: Config, args: argparse.Namespace) -> No
         else:
             print(f"  delay             : {summary.final_delay:.1f}s")
     print(f"  journal           : {cfg.journal_path}")
+    if summary.tab_crash_recoveries or summary.failed_browser_crash:
+        print(f"  tab recoveries    : {summary.tab_crash_recoveries} "
+              f"(maximum {cfg.max_tab_crash_recoveries})")
     if summary.interrupted:
         print("")
         print("  ^C INTERRUPTED - stopped at your request, nothing lost.")
@@ -471,6 +481,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.heartbeat_every < 0:
         print("--heartbeat-every must be >= 0 (0 disables it)", file=sys.stderr)
         return 2
+    if args.max_tab_crash_recoveries < 0:
+        print("--max-tab-crash-recoveries must be >= 0", file=sys.stderr)
+        return 2
 
     cfg = Config(
         execute=args.execute,
@@ -490,6 +503,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         heartbeat_every=args.heartbeat_every,
         max_attempts=args.max_attempts,
         retry_quarantined=args.retry_quarantined,
+        max_tab_crash_recoveries=args.max_tab_crash_recoveries,
     )
 
     print(f"gphotos_delete_orphans.py {VERSION}")
@@ -550,6 +564,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             settle_ms=int(args.settle * 1000),
             post_action_settle_ms=int(args.post_action_settle * 1000),
             verbose=cfg.verbose,
+            max_tab_crash_recoveries=cfg.max_tab_crash_recoveries,
         )
     except DriverError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

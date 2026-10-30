@@ -1,5 +1,32 @@
 # Deleter design and safety notes
 
+## 1.4.0: renderer crash recovery and timestamped output
+
+`Page.goto: Page crashed` is a Chrome renderer failure, not evidence of Google
+throttling. It is reported as `browser-crash` and excluded from cooldown failure
+kinds. The driver watches its own tab's crash event and recognizes native crash
+errors. It immediately replaces only that tab in the same authenticated context
+and retries guarded, read-only navigation once.
+
+The per-run replacement budget is three by default, configurable with
+`--max-tab-crash-recoveries`. A fresh tab that crashes again, an unavailable
+browser context, or an exhausted budget stops with exit code 6. Sign-in checks
+and input URL guards still apply after replacement. The browser process, other
+tabs, and authentication profile are never restarted by recovery.
+
+A renderer failure during an unverified trash action leaves the item pending;
+it is not automatically clicked again. On resume the item is probed and can be
+recorded already gone. During verification, a fresh-tab read can confirm that
+the deletion succeeded. A confirmation toast observed before a crash remains
+valid success evidence. Crashes do not increase the configured inter-item delay.
+
+Every nonempty run-output line now carries local time and its UTC offset,
+including item headers, success/failure lines, and multiline diagnostics. Journal
+timestamps continue to be written as before. The summary reports tab recoveries
+and renderer failures separately from navigation throttling.
+
+## Earlier design and incident history
+
 gphotos_delete_orphans.py - paced, resumable, verifying deletion of Google Photos
 items by permalink, driven from a reviewed input file.
 

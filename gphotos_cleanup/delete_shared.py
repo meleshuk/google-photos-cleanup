@@ -19,7 +19,16 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 # Constants
 # --------------------------------------------------------------------------- #
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
+
+
+def timestamped_logger(sink):
+    """Add local time and UTC offset to every nonempty output line."""
+    def emit(message):
+        for line in str(message).split("\n"):
+            sink("[%s] %s" % (time.strftime("%Y-%m-%d %H:%M:%S%z"), line)
+                 if line else "")
+    return emit
 
 # How long after a first Ctrl-C a SECOND one still means "stop the run" rather
 # than "skip this cooldown" (GUARDRAIL 10, v1.2.3). Long enough for a deliberate
@@ -327,13 +336,14 @@ STACKED_CURRENT_ONLY_RE = re.compile(
 #                       evidence of a delete quota and worth cooling down for.
 #   other               anything else unexpected.
 FAIL_NAVIGATION = "navigation-resolve"
+FAIL_BROWSER_CRASH = "browser-crash"
 FAIL_STACKED = "stacked-dialog"
 FAIL_NO_DIALOG = "no-dialog"
 FAIL_MUTATION = "mutation-no-op"
 FAIL_OTHER = "other"
 
 FAILURE_KINDS = (
-    FAIL_NAVIGATION, FAIL_STACKED, FAIL_NO_DIALOG, FAIL_MUTATION, FAIL_OTHER
+    FAIL_NAVIGATION, FAIL_BROWSER_CRASH, FAIL_STACKED, FAIL_NO_DIALOG, FAIL_MUTATION, FAIL_OTHER
 )
 
 # Failure kinds that mean "this script could not drive the UI", as opposed to
@@ -374,6 +384,18 @@ class FatalDriverError(DriverError):
     """
 
     kind = FAIL_NAVIGATION
+
+
+class PageCrashError(DriverError):
+    """A renderer crash, never evidence of Google throttling."""
+
+    kind = FAIL_BROWSER_CRASH
+
+
+class FatalPageCrashError(FatalDriverError):
+    """Fresh-tab recovery failed or its bounded recovery budget was exhausted."""
+
+    kind = FAIL_BROWSER_CRASH
 
 
 class StackedDialogError(DriverError):

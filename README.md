@@ -198,6 +198,17 @@ The default journal is `~/Desktop/gphotos_delete_journal.jsonl`. Keep it: it
 makes runs resumable and prevents completed URLs from being acted on again.
 Interrupting with Ctrl-C is safe because the journal is flushed after each item.
 
+Each progress, completion, and failure line includes local time and its UTC
+offset, including individual lines of multiline browser errors.
+
+Chrome renderer crashes are handled separately from throttling. A crashed script
+tab is replaced immediately in the same authenticated context, and its read-only
+navigation is retried once. The default recovery budget is three tab replacements
+per run (`--max-tab-crash-recoveries 3`). A crash on the fresh tab or an exhausted
+budget stops the run with exit code 6; it does not trigger a 20-minute cooldown.
+An unverified trash action stays pending and is checked again on resume. A
+confirmation toast already observed still counts as verified success.
+
 Use `--help` and the script's module documentation for cooldowns, quarantine,
 large-run confirmation, exit codes, and recovery guidance.
 
@@ -206,7 +217,7 @@ large-run confirmation, exit codes, and recovery guidance.
 The finder has synthetic end-to-end Takeout tests covering duplicate stills,
 album ambiguity, transcodes, and Live Photo companions. The deleter includes 99
 offline guardrail and regression tests that never open a browser or network
-connection.
+connection, plus additional crash-recovery and timestamp tests under `tests/`.
 
 ```bash
 python3 -m unittest discover -s tests -v

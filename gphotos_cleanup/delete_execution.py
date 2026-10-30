@@ -34,6 +34,7 @@ class Config:
     # ones back in.
     max_attempts: int = 3
     retry_quarantined: bool = False
+    max_tab_crash_recoveries: int = 3
 
 
 @dataclass
@@ -67,6 +68,7 @@ class Summary:
     starting_delay: float = 0.0
     final_delay: float = 0.0
     elapsed_seconds: float = 0.0
+    tab_crash_recoveries: int = 0
     interrupted: bool = False
     # FIX 1 (v1.3.0): how the successful actions were performed. A non-zero
     # toolbar count is the measure of how often the '#' shortcut silently does
@@ -95,6 +97,10 @@ class Summary:
     @property
     def failed_navigation(self) -> int:
         return self.failed_by_kind.get(FAIL_NAVIGATION, 0)
+
+    @property
+    def failed_browser_crash(self) -> int:
+        return self.failed_by_kind.get(FAIL_BROWSER_CRASH, 0)
 
     @property
     def failed_stacked(self) -> int:
@@ -354,6 +360,7 @@ def run(  # noqa: C901 - one linear item loop; splitting it hides the control fl
     sleeper=_sleep_with_jitter,
     cooldown_sleeper=interruptible_sleep,
 ) -> Summary:
+    log = timestamped_logger(log)
     summary = Summary(
         considered=len(items), starting_delay=cfg.delay, final_delay=cfg.delay
     )
@@ -727,7 +734,7 @@ def run(  # noqa: C901 - one linear item loop; splitting it hides the control fl
                 # Identity / auth problems never get a cooldown.
                 summary.attempted += 1
                 note_attempt(item)
-                record_failure(FAIL_NAVIGATION)
+                record_failure(driver.failure_kind(exc))
                 log(f"    FAILED (fatal): {exc}")
                 if cfg.execute:
                     journal.record(item, "failed", f"fatal: {exc}")
@@ -740,7 +747,7 @@ def run(  # noqa: C901 - one linear item loop; splitting it hides the control fl
             except DriverError as exc:
                 summary.attempted += 1
                 note_attempt(item)
-                record_failure(getattr(exc, "kind", FAIL_OTHER))
+                record_failure(driver.failure_kind(exc))
                 log(f"    FAILED (resolve): {exc}")
                 if cfg.execute:
                     journal.record(item, "failed", f"resolve: {exc}")
@@ -847,7 +854,7 @@ def run(  # noqa: C901 - one linear item loop; splitting it hides the control fl
                 heartbeat(index)
                 continue
             except FatalDriverError as exc:
-                record_failure(FAIL_NAVIGATION)
+                record_failure(driver.failure_kind(exc))
                 log(f"    FAILED (fatal): {exc}")
                 journal.record(item, "failed", f"fatal: {exc}")
                 stop(
@@ -857,7 +864,7 @@ def run(  # noqa: C901 - one linear item loop; splitting it hides the control fl
                 )
                 break
             except DriverError as exc:
-                record_failure(getattr(exc, "kind", FAIL_OTHER))
+                record_failure(driver.failure_kind(exc))
                 log(f"    FAILED (delete/verify): {exc}")
                 journal.record(item, "failed", f"delete: {exc}")
                 if post_resume_window_blown():
@@ -979,6 +986,7 @@ def run(  # noqa: C901 - one linear item loop; splitting it hides the control fl
 
     summary.elapsed_seconds = time.monotonic() - started
     summary.final_delay = cfg.delay
+    summary.tab_crash_recoveries = getattr(driver, "tab_crash_recoveries", 0)
     if cfg.execute:
         # Recount from the journal: items the breaker stopped us reaching are
         # still pending, and so are any that failed.
@@ -999,6 +1007,7 @@ def run_offline(
     items: Sequence[Item], journal: Journal, cfg: Config, log=print
 ) -> Summary:
     """Dry-run planning with no browser at all: what would the next run touch?"""
+    log = timestamped_logger(log)
     summary = Summary(considered=len(items))
     pending = [item for item in items if not journal.is_done(item.url)]
     summary.skipped_done = len(items) - len(pending)

@@ -367,6 +367,9 @@ class PhotosDriver:
         """Throw away accumulated page state between cooldowns. Returns a note."""
         raise NotImplementedError
 
+    def failure_kind(self, error):
+        return getattr(error, "kind", FAIL_OTHER)
+
     def close(self) -> None:  # pragma: no cover - interface
         raise NotImplementedError
 
@@ -396,6 +399,8 @@ class PlaywrightDriver(PhotosDriver):
         settle_ms: int = 1200,
         post_action_settle_ms: int = 3000,
         verbose: bool = False,
+        max_tab_crash_recoveries: int = 3,
+        log=print,
     ) -> None:
         try:
             from playwright.sync_api import sync_playwright
@@ -412,6 +417,10 @@ class PlaywrightDriver(PhotosDriver):
         self._settle_ms = settle_ms
         self._post_action_settle_ms = max(0, post_action_settle_ms)
         self._verbose = verbose
+        self._max_tab_crash_recoveries = max(0, max_tab_crash_recoveries)
+        self.tab_crash_recoveries = 0
+        self._crashed = False
+        self._log = timestamped_logger(log)
         # Containers that were inspected and held no options at all. Recorded
         # rather than silently skipped: "no scope found" was indistinguishable
         # from "no dialog up" in v1.2.1, and that is how BUG A hid.
@@ -441,6 +450,7 @@ class PlaywrightDriver(PhotosDriver):
         self._context = contexts[0]
         self._page = self._context.new_page()
         self._page.set_default_timeout(nav_timeout_ms)
+        self._watch_page(self._page)
 
     # -- internals ---------------------------------------------------------- #
 
@@ -482,14 +492,84 @@ class PlaywrightDriver(PhotosDriver):
             )
         )
 
-    def _navigate(self, url: str) -> None:
+    def _watch_page(self, page):
+        def crashed(*_args):
+            if self._page is page:
+                self._crashed = True
+        page.on("crash", crashed)
+
+    def _page_has_crashed(self, error=None):
+        if getattr(self, "_crashed", False):
+            return True
+        if error is not None and "page crashed" in str(error).lower():
+            return True
         try:
-            self._page.goto(
-                url, wait_until="domcontentloaded", timeout=self._nav_timeout_ms
-            )
+            return self._page.is_closed()
+        except Exception:
+            return False
+
+    def failure_kind(self, error):
+        if self._page_has_crashed(error):
+            return FAIL_BROWSER_CRASH
+        return super().failure_kind(error)
+
+    def _recover_crashed_tab(self):
+        count = getattr(self, "tab_crash_recoveries", 0)
+        limit = getattr(self, "_max_tab_crash_recoveries", 3)
+        if count >= limit:
+            raise FatalPageCrashError(
+                "tab crash recovery budget exhausted (%d/%d); inspect Chrome "
+                "and resume with the same journal" % (count, limit))
+        fresh = None
+        try:
+            fresh = self._context.new_page()
+            fresh.set_default_timeout(self._nav_timeout_ms)
+            self._watch_page(fresh)
         except Exception as exc:
-            raise NavigationError(f"navigation failed: {exc}") from exc
-        self._page.wait_for_timeout(self._settle_ms)
+            if fresh is not None:
+                try:
+                    fresh.close()
+                except Exception:
+                    pass
+            raise FatalPageCrashError("could not replace the crashed tab: %s" % exc) from exc
+        old = self._page
+        self._page = fresh
+        self._crashed = False
+        self.tab_crash_recoveries = count + 1
+        try:
+            old.close()
+        except Exception:
+            pass
+        logger = getattr(self, "_log", timestamped_logger(print))
+        logger("  browser crash recovery %d/%d: replaced the script's tab; "
+               "retrying read-only navigation" % (self.tab_crash_recoveries, limit))
+
+    def _navigate(self, url: str) -> None:
+        nav_guard(url, self._allowed)
+        retried = False
+        while True:
+            if self._page_has_crashed():
+                if retried:
+                    raise FatalPageCrashError("the replacement tab is already closed or crashed")
+                self._recover_crashed_tab()
+                retried = True
+            try:
+                self._page.goto(
+                    url, wait_until="domcontentloaded", timeout=self._nav_timeout_ms
+                )
+                self._page.wait_for_timeout(self._settle_ms)
+                if self._page_has_crashed():
+                    raise PageCrashError("Page crashed after navigation")
+                return
+            except Exception as exc:
+                if not self._page_has_crashed(exc):
+                    raise NavigationError(f"navigation failed: {exc}") from exc
+                if retried:
+                    raise FatalPageCrashError(
+                        "the fresh tab crashed while retrying navigation; stopping "
+                        "without cooldown: %s" % exc) from exc
+                self._recover_crashed_tab()
+                retried = True
 
     def _note_empty_scope(self, where: str, labels: Sequence[str]) -> None:
         """Record a container that was inspected and held no options."""
@@ -1171,6 +1251,10 @@ class PlaywrightDriver(PhotosDriver):
                     f"route taken: {action_route}\n" + diagnostics
                 )
 
+        if self._page_has_crashed() and not toast:
+            raise PageCrashError(
+                "tab crashed during the trash action; deletion is unverified "
+                "and this item remains pending")
         return TrashOutcome(
             note=note,
             toast_seen=bool(toast),
@@ -1230,6 +1314,8 @@ class PlaywrightDriver(PhotosDriver):
                 return f"could not recycle the tab ({blank_exc}); continuing anyway"
         old = self._page
         self._page = fresh
+        self._crashed = False
+        self._watch_page(fresh)
         self._page.set_default_timeout(self._nav_timeout_ms)
         try:
             old.close()
