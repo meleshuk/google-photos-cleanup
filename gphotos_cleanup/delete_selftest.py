@@ -1762,6 +1762,7 @@ def self_test() -> int:  # noqa: C901 - a flat list of checks reads better here
                 pass
 
         driver = PlaywrightDriver.__new__(PlaywrightDriver)
+        driver._background = False
         driver._page = StubPage()
         driver._nav_timeout_ms = 30000
         driver._verbose = False
@@ -2089,6 +2090,7 @@ def self_test() -> int:  # noqa: C901 - a flat list of checks reads better here
 
     def dom_driver(page):
         driver = PlaywrightDriver.__new__(PlaywrightDriver)
+        driver._background = False
         driver._page = page
         driver._nav_timeout_ms = 30000
         driver._post_action_settle_ms = 0

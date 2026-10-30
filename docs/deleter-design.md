@@ -1,5 +1,27 @@
 # Deleter design and safety notes
 
+## 1.5.0: default background operation
+
+Background mode creates the automation target with CDP `Target.createTarget`
+and `background=true`, verifies its target identity, and keeps focus emulation
+inside that owned tab. It never activates the OS window or sends keyboard
+shortcuts. The toolbar trash control is used directly, and confirmation still
+passes through the same scope, option, and safe-click guardrails.
+
+An unknown dialog stays untouched until the next guarded navigation. If the
+toolbar cannot be found, the item fails safely; no foreground or keyboard
+fallback is attempted. Explicit `--foreground` retains the previous shortcut
+route. Crash recovery and cooldown recycling use the same background factory.
+
+The owned target is closed before its focus-emulation session is released, so
+Chrome destroys the associated CDP sessions without freezing a hidden renderer.
+Other tabs, the user's browser process, and authentication remain in place.
+
+The real CDP regression test renders a local synthetic photo UI in a temporary
+tab and verifies toolbar/dialog behavior, target creation, and replacement while
+the pre-existing tab keeps its visibility state. No real photo request or
+deletion is performed by that test.
+
 ## 1.4.0: renderer crash recovery and timestamped output
 
 `Page.goto: Page crashed` is a Chrome renderer failure, not evidence of Google

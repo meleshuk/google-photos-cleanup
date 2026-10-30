@@ -89,6 +89,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum fresh-tab crash recoveries per run (default: 3; 0 stops on "
              "the first crash). Crashes never trigger throttling cooldowns",
     )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--background", dest="background", action="store_true",
+                      help="use background tabs and toolbar clicks without stealing focus (default)")
+    mode.add_argument("--foreground", dest="background", action="store_false",
+                      help="use the legacy foreground tab and keyboard shortcut")
+    parser.set_defaults(background=True)
     parser.add_argument(
         "--nav-timeout",
         type=float,
@@ -246,6 +252,7 @@ def print_summary(summary: Summary, cfg: Config, args: argparse.Namespace) -> No
     print(f"  mode              : {'EXECUTE' if cfg.execute else 'DRY RUN'}"
           f"{' (offline)' if args.offline else ''}")
     print(f"  input             : {os.path.expanduser(args.input)}")
+    print(f"  browser mode      : {'background' if cfg.background else 'foreground'}")
     print(f"  items in input    : {summary.considered}")
     if summary.invalid:
         print(f"  invalid rows      : {summary.invalid} (ignored, never acted on)")
@@ -504,6 +511,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_attempts=args.max_attempts,
         retry_quarantined=args.retry_quarantined,
         max_tab_crash_recoveries=args.max_tab_crash_recoveries,
+        background=args.background,
     )
 
     print(f"gphotos_delete_orphans.py {VERSION}")
@@ -565,6 +573,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             post_action_settle_ms=int(args.post_action_settle * 1000),
             verbose=cfg.verbose,
             max_tab_crash_recoveries=cfg.max_tab_crash_recoveries,
+            background=cfg.background,
         )
     except DriverError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

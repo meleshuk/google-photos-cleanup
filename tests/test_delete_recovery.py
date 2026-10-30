@@ -89,6 +89,8 @@ def driver_for(old, new_pages, maximum=3):
     driver._max_tab_crash_recoveries = maximum
     driver.tab_crash_recoveries = 0
     driver._crashed = False
+    driver._background = False
+    driver._background_sessions = {}
     driver.messages = []
     driver._log = timestamped_logger(driver.messages.append)
     driver._watch_page(old)

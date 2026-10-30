@@ -19,7 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 # Constants
 # --------------------------------------------------------------------------- #
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 
 def timestamped_logger(sink):
@@ -390,6 +390,12 @@ class PageCrashError(DriverError):
     """A renderer crash, never evidence of Google throttling."""
 
     kind = FAIL_BROWSER_CRASH
+
+
+class NoDialogError(DriverError):
+    """The guarded trash control or its confirmation could not be reached."""
+
+    kind = FAIL_NO_DIALOG
 
 
 class FatalPageCrashError(FatalDriverError):

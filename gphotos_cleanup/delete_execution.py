@@ -35,6 +35,7 @@ class Config:
     max_attempts: int = 3
     retry_quarantined: bool = False
     max_tab_crash_recoveries: int = 3
+    background: bool = True
 
 
 @dataclass
@@ -806,7 +807,7 @@ def run(  # noqa: C901 - one linear item loop; splitting it hides the control fl
                 # FIX 1: the shortcut silently doing nothing is worth saying out
                 # loud every time, and counting - it is the measurement that
                 # tells us how widespread the problem is.
-                if not outcome.shortcut_opened_dialog:
+                if outcome.shortcut_attempted and not outcome.shortcut_opened_dialog:
                     summary.shortcut_opened_no_dialog += 1
                     if outcome.route == ROUTE_TOOLBAR:
                         summary.toolbar_fallbacks += 1
@@ -922,6 +923,9 @@ def run(  # noqa: C901 - one linear item loop; splitting it hides the control fl
                     # moved), NOT the delete limiter - and precisely the case
                     # that produced no evidence at all up to v1.2.2.
                     last_error = (
+                        "the background toolbar action did not open a confirmation "
+                        "dialog; keyboard shortcuts are disabled"
+                    ) if not outcome.shortcut_attempted else (
                         "neither the '#' shortcut nor the toolbar fallback opened "
                         "a delete dialog, so the deletion was never requested and "
                         "the item is still there. The viewer controls have "

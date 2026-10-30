@@ -39,6 +39,7 @@ class TrashOutcome:
     # learn how often the shortcut silently fails.
     route: str = ROUTE_SHORTCUT
     shortcut_opened_dialog: bool = True
+    shortcut_attempted: bool = True
     # Whether a delete dialog was actually found and answered. False means the
     # deletion was never requested at all, which is a code gap in this script
     # (`no-dialog`) and NOT evidence about a delete quota.
@@ -401,6 +402,7 @@ class PlaywrightDriver(PhotosDriver):
         verbose: bool = False,
         max_tab_crash_recoveries: int = 3,
         log=print,
+        background: bool = True,
     ) -> None:
         try:
             from playwright.sync_api import sync_playwright
@@ -421,6 +423,8 @@ class PlaywrightDriver(PhotosDriver):
         self.tab_crash_recoveries = 0
         self._crashed = False
         self._log = timestamped_logger(log)
+        self._background = background
+        self._background_sessions = {}
         # Containers that were inspected and held no options at all. Recorded
         # rather than silently skipped: "no scope found" was indistinguishable
         # from "no dialog up" in v1.2.1, and that is how BUG A hid.
@@ -428,7 +432,7 @@ class PlaywrightDriver(PhotosDriver):
 
         self._pw = sync_playwright().start()
         try:
-            self._browser = self._pw.chromium.connect_over_cdp(cdp_url)
+            self._browser = self._pw.chromium.connect_over_cdp(cdp_url, timeout=nav_timeout_ms)
         except Exception as exc:
             self._pw.stop()
             raise DriverError(
@@ -448,11 +452,72 @@ class PlaywrightDriver(PhotosDriver):
             )
         # Reuse the EXISTING context: that is where the user's session cookies are.
         self._context = contexts[0]
-        self._page = self._context.new_page()
-        self._page.set_default_timeout(nav_timeout_ms)
-        self._watch_page(self._page)
+        try:
+            self._page = self._new_automation_page()
+            self._page.set_default_timeout(nav_timeout_ms)
+            self._watch_page(self._page)
+        except Exception:
+            self.close()
+            raise
 
     # -- internals ---------------------------------------------------------- #
+
+    def _new_automation_page(self):
+        """Create only our target, with no foreground activation in background mode."""
+        if not self._background:
+            return self._context.new_page()
+        session = self._browser.new_browser_cdp_session()
+        target_id = None
+        try:
+            with self._context.expect_page(timeout=self._nav_timeout_ms) as pending:
+                target_id = session.send("Target.createTarget", {
+                    "url": "about:blank", "background": True,
+                })["targetId"]
+            candidates = [pending.value]
+            seen = set()
+            deadline = time.monotonic() + self._nav_timeout_ms / 1000.0
+            while True:
+                for page in candidates:
+                    seen.add(page)
+                    page_session = self._context.new_cdp_session(page)
+                    keep_session = False
+                    try:
+                        info = page_session.send("Target.getTargetInfo")["targetInfo"]
+                        if info["targetId"] != target_id:
+                            continue
+                        # Emulate DOM focus/visibility without activating the OS
+                        # window. Keep the session alive for this owned page.
+                        page_session.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
+                        self._background_sessions[page] = page_session
+                        keep_session = True
+                        return page
+                    finally:
+                        if not keep_session:
+                            page_session.detach()
+                candidates = [page for page in self._context.pages if page not in seen]
+                if candidates:
+                    continue
+                remaining = int((deadline - time.monotonic()) * 1000)
+                if remaining <= 0:
+                    raise DriverError("could not identify the newly created background tab")
+                candidates = [self._context.wait_for_event("page", timeout=remaining)]
+        except Exception as exc:
+            if target_id is not None:
+                try:
+                    session.send("Target.closeTarget", {"targetId": target_id})
+                except Exception:
+                    pass
+            raise DriverError("could not create a background automation tab: %s" % exc) from exc
+        finally:
+            session.detach()
+
+    def _close_owned_page(self, page):
+        # Closing the target tears down its CDP sessions automatically. Detaching
+        # focus emulation first can freeze a hidden renderer during cleanup.
+        try:
+            page.close()
+        finally:
+            self._background_sessions.pop(page, None)
 
     def _page_text(self) -> str:
         try:
@@ -522,13 +587,13 @@ class PlaywrightDriver(PhotosDriver):
                 "and resume with the same journal" % (count, limit))
         fresh = None
         try:
-            fresh = self._context.new_page()
+            fresh = self._new_automation_page()
             fresh.set_default_timeout(self._nav_timeout_ms)
             self._watch_page(fresh)
         except Exception as exc:
             if fresh is not None:
                 try:
-                    fresh.close()
+                    self._close_owned_page(fresh)
                 except Exception:
                     pass
             raise FatalPageCrashError("could not replace the crashed tab: %s" % exc) from exc
@@ -537,7 +602,7 @@ class PlaywrightDriver(PhotosDriver):
         self._crashed = False
         self.tab_crash_recoveries = count + 1
         try:
-            old.close()
+            self._close_owned_page(old)
         except Exception:
             pass
         logger = getattr(self, "_log", timestamped_logger(print))
@@ -1050,6 +1115,10 @@ class PlaywrightDriver(PhotosDriver):
         Escape only: on a dialog this script could not read, no button is known
         to be safe to press.
         """
+        if self._background:
+            # Unknown controls stay untouched. The next guarded navigation
+            # discards the dialog without sending any keyboard input.
+            return
         try:
             self._page.keyboard.press("Escape")
             self._page.wait_for_timeout(400)
@@ -1139,30 +1208,23 @@ class PlaywrightDriver(PhotosDriver):
         if not (page.url or "").startswith(PHOTO_PREFIX):
             raise DriverError(f"refusing to trash: not on an item page ({page.url})")
 
-        # The keystroke goes to whichever tab Chrome considers active, so raise
-        # ours first rather than depending on window-focus luck.
-        try:
-            page.bring_to_front()
-        except Exception:
-            pass
-
-        # '#' is the Google Photos viewer shortcut for "move to trash". Using the
-        # shortcut avoids hunting through a frequently-reshuffled toolbar, and it
-        # worked for thousands of real deletions.
-        try:
-            page.keyboard.press("#")
-        except Exception as exc:
-            raise DriverError(f"could not send the trash shortcut: {exc}") from exc
-
-        # FIX 1: wait for a dialog rather than assuming one appeared. For some
-        # items the keystroke silently does nothing - no dialog, nothing to
-        # scope, nothing to classify - which is exactly what made three real
-        # items look like a silently-ignored delete.
-        action_route = ROUTE_SHORTCUT
-        shortcut_opened_dialog = True
-        scope = self._wait_for_dialog()
-        if scope is None:
-            shortcut_opened_dialog = False
+        background = self._background
+        action_route = ROUTE_TOOLBAR if background else ROUTE_SHORTCUT
+        shortcut_opened_dialog = False
+        scope = None
+        if not background:
+            # Explicit foreground compatibility mode retains the shortcut.
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
+            try:
+                page.keyboard.press("#")
+            except Exception as exc:
+                raise DriverError(f"could not send the trash shortcut: {exc}") from exc
+            scope = self._wait_for_dialog()
+            shortcut_opened_dialog = scope is not None
+        if background or scope is None:
             # Fall back to the viewer toolbar's own control. It is OUTSIDE the
             # dialog by construction (_toolbar_trash_control refuses anything
             # inside one), so this press OPENS a dialog; answering it still goes
@@ -1175,10 +1237,12 @@ class PlaywrightDriver(PhotosDriver):
                     action_route = ROUTE_TOOLBAR
                 except Exception as exc:
                     raise DriverError(
-                        f"the trash shortcut opened no dialog and the toolbar "
-                        f"control {control_label!r} could not be clicked: {exc}"
+                        f"toolbar trash control {control_label!r} could not be clicked: {exc}"
                     ) from exc
                 scope = self._wait_for_dialog()
+            elif background:
+                raise NoDialogError("no guarded toolbar trash control found in background mode; "
+                                    "no keyboard shortcut or foreground fallback was attempted")
 
         note = action_route
         stacked = False
@@ -1245,7 +1309,7 @@ class PlaywrightDriver(PhotosDriver):
             # detected, which is the one that produced no evidence at all up to
             # v1.2.2 and cost three rounds of guessing at markup.
             diagnostics = self._failure_diagnostics(after)
-            if not shortcut_opened_dialog:
+            if not background and not shortcut_opened_dialog:
                 diagnostics = (
                     "  the '#' shortcut opened no dialog; "
                     f"route taken: {action_route}\n" + diagnostics
@@ -1268,6 +1332,7 @@ class PlaywrightDriver(PhotosDriver):
             diagnostics=diagnostics,
             route=action_route,
             shortcut_opened_dialog=shortcut_opened_dialog,
+            shortcut_attempted=not background,
             dialog_answered=dialog_answered,
         )
 
@@ -1304,7 +1369,7 @@ class PlaywrightDriver(PhotosDriver):
         user's Chrome process and their other tabs are never restarted or closed.
         """
         try:
-            fresh = self._context.new_page()
+            fresh = self._new_automation_page()
         except Exception as exc:
             # Could not get a tab; settle for emptying the one we have.
             try:
@@ -1318,7 +1383,7 @@ class PlaywrightDriver(PhotosDriver):
         self._watch_page(fresh)
         self._page.set_default_timeout(self._nav_timeout_ms)
         try:
-            old.close()
+            self._close_owned_page(old)
         except Exception:
             return "opened a fresh tab (the old one would not close)"
         return "opened a fresh tab and closed the old one"
@@ -1326,7 +1391,7 @@ class PlaywrightDriver(PhotosDriver):
     def close(self) -> None:
         # GUARDRAIL 9: close only our own tab. Never close the user's browser.
         for closer in (
-            lambda: self._page.close(),
+            lambda: self._close_owned_page(self._page),
             lambda: self._browser.close(),
             lambda: self._pw.stop(),
         ):

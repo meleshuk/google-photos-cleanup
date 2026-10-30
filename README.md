@@ -209,6 +209,14 @@ budget stops the run with exit code 6; it does not trigger a 20-minute cooldown.
 An unverified trash action stays pending and is checked again on resume. A
 confirmation toast already observed still counts as verified success.
 
+Background operation is the default (`--background`). The script creates its own
+tab without activating it, emulates focus only inside that tab, and uses the
+guarded toolbar trash control directly. It sends no trash/Escape keyboard
+shortcuts and never brings Chrome forward. You can minimize Chrome or work in
+another application while it runs. `--foreground` restores the legacy behavior
+for manual troubleshooting. Restart a running deletion process to pick up a mode
+change; the same journal preserves completed items.
+
 Use `--help` and the script's module documentation for cooldowns, quarantine,
 large-run confirmation, exit codes, and recovery guidance.
 
@@ -223,6 +231,17 @@ connection, plus additional crash-recovery and timestamp tests under `tests/`.
 python3 -m unittest discover -s tests -v
 python3 gphotos_delete_orphans.py --self-test
 ```
+
+An optional real Chrome check uses a local synthetic UI and no real photos:
+
+```bash
+GPHOTOS_BROWSER_TESTS=1 .venv/bin/python -m unittest discover \
+  -s tests -p 'test_delete_background_browser.py' -v
+```
+
+It normally launches a fresh headless browser. To use an already-running Chrome
+debugging endpoint instead, also set `GPHOTOS_TEST_CDP_URL=http://127.0.0.1:9222`.
+Only temporary synthetic test tabs are changed; existing tabs remain untouched.
 
 ## Code organization
 
