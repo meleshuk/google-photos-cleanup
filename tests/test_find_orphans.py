@@ -21,7 +21,7 @@ def sidecar(title, timestamp, suffix):
 
 
 class FinderIntegrationTests(unittest.TestCase):
-    def run_export(self, entries):
+    def run_export(self, entries, *flags):
         """Exercise the whole source/pairing/classification/reporting pipeline."""
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
@@ -31,7 +31,7 @@ class FinderIntegrationTests(unittest.TestCase):
                 for name, content in entries.items():
                     takeout.writestr(f"Takeout/Google Photos/{name}", content)
             result = subprocess.run(
-                [sys.executable, str(FINDER), str(archive), "-o", str(output)],
+                [sys.executable, str(FINDER), str(archive), "-o", str(output), *flags],
                 capture_output=True, text=True, timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -43,6 +43,9 @@ class FinderIntegrationTests(unittest.TestCase):
                 csv_rows = list(csv.DictReader(handle))
             self.assertEqual([row["url"] for row in csv_rows],
                              [item["url"] for item in report["orphans"]])
+            self.assertEqual([row["upload_mechanism"] for row in csv_rows],
+                             [item["upload_mechanism"] or "unknown"
+                              for item in report["orphans"]])
             return report
 
     def duplicate_entries(self, second_name="IMG_1194.JPG"):
@@ -54,6 +57,124 @@ class FinderIntegrationTests(unittest.TestCase):
             second: b"second still",
             second + ".json": sidecar("IMG_1194.JPG", 1599940534, "SECOND"),
         }
+
+    def set_origin(self, entries, name, mechanism):
+        metadata = json.loads(entries[name])
+        metadata["googlePhotosOrigin"] = {mechanism: {}}
+        entries[name] = json.dumps(metadata)
+
+    def origin_entries(self, album_origin="webUpload"):
+        entries = self.duplicate_entries()
+        self.set_origin(entries, "Photos from 2020/IMG_1194.HEIC.json", "mobileUpload")
+        self.set_origin(entries, "Photos from 2020/IMG_1194.JPG.json", "webUpload")
+        entries["My Album/IMG_1194.JPG.json"] = sidecar(
+            "IMG_1194.JPG", 1599940534, "ALBUMCOPY")
+        self.set_origin(entries, "My Album/IMG_1194.JPG.json", album_origin)
+        return entries
+
+    def test_album_web_upload_leaves_mobile_duplicate_as_orphan(self):
+        report = self.run_export(self.origin_entries())
+        self.assertEqual(report["counts"]["orphans"], 1)
+        self.assertEqual(report["counts"]["library_items_in_real_album"], 1)
+        self.assertTrue(report["orphans"][0]["url"].endswith("FIRST"))
+        self.assertEqual(report["orphans"][0]["upload_mechanism"], "mobileUpload")
+        self.assertEqual(report["source_totals"]["media_bytes_read"], 0)
+
+    def test_album_mobile_upload_protects_mobile_duplicate_instead(self):
+        report = self.run_export(self.origin_entries(album_origin="mobileUpload"))
+        self.assertEqual(report["counts"]["library_items_in_real_album"], 1)
+        self.assertTrue(report["orphans"][0]["url"].endswith("SECOND"))
+
+    def test_identical_media_can_be_resolved_by_origin(self):
+        entries = self.origin_entries()
+        entries["Photos from 2020/IMG_1194.JPG"] = entries["Photos from 2020/IMG_1194.HEIC"]
+        report = self.run_export(entries, "--hash-duplicate-media")
+        self.assertEqual(report["counts"]["orphans"], 1)
+        self.assertEqual(report["source_totals"]["media_bytes_read"], 0)
+
+    def test_unknown_album_origin_cannot_release_either_duplicate(self):
+        entries = self.origin_entries()
+        entries["My Album/IMG_1194.JPG.json"] = sidecar(
+            "IMG_1194.JPG", 1599940534, "ALBUMCOPY")
+        report = self.run_export(entries)
+        self.assertEqual(report["orphans"], [])
+        self.assertEqual(report["counts"]["uncertain"], 2)
+
+    def test_contradictory_origins_do_not_release_duplicates(self):
+        entries = self.origin_entries(album_origin="picasa")
+        report = self.run_export(entries)
+        self.assertEqual(report["orphans"], [])
+        self.assertEqual(report["counts"]["uncertain"], 2)
+
+    def test_origin_and_media_contradiction_stays_uncertain(self):
+        entries = self.origin_entries()
+        # Album metadata says web, but its bytes match only the mobile upload.
+        entries["My Album/IMG_1194.JPG"] = entries["Photos from 2020/IMG_1194.HEIC"]
+        report = self.run_export(entries)
+        self.assertEqual(report["orphans"], [])
+        self.assertEqual(report["counts"]["uncertain"], 2)
+
+    def test_second_album_origin_protects_the_other_duplicate(self):
+        entries = self.origin_entries()
+        entries["Other Album/IMG_1194.HEIC.json"] = sidecar(
+            "IMG_1194.HEIC", 1599940534, "OTHERALBUM")
+        self.set_origin(entries, "Other Album/IMG_1194.HEIC.json", "mobileUpload")
+        report = self.run_export(entries)
+        self.assertEqual(report["orphans"], [])
+        self.assertEqual(report["counts"]["library_items_in_real_album"], 2)
+
+    def hash_entries(self):
+        entries = self.duplicate_entries()
+        entries["My Album/IMG_1194.HEIC"] = entries["Photos from 2020/IMG_1194.HEIC"]
+        entries["My Album/IMG_1194.HEIC.json"] = sidecar(
+            "IMG_1194.HEIC", 1599940534, "ALBUMCOPY")
+        for name in ("Photos from 2020/IMG_1194.HEIC.json",
+                     "Photos from 2020/IMG_1194.JPG.json",
+                     "My Album/IMG_1194.HEIC.json"):
+            self.set_origin(entries, name, "webUpload")
+        return entries
+
+    def test_hash_resolves_same_mechanism_duplicate(self):
+        report = self.run_export(self.hash_entries(), "--hash-duplicate-media")
+        self.assertEqual(report["counts"]["library_items_in_real_album"], 1)
+        self.assertEqual(report["counts"]["orphans"], 1)
+        self.assertTrue(report["orphans"][0]["url"].endswith("SECOND"))
+        self.assertEqual(report["orphans"][0]["duplicate_membership_resolution"]["methods"],
+                         ["sha256"])
+        self.assertEqual(report["source_totals"]["media_files_hashed"], 2)
+
+    def test_default_does_not_hash_media(self):
+        report = self.run_export(self.hash_entries())
+        self.assertEqual(report["counts"]["uncertain"], 2)
+        self.assertEqual(report["source_totals"]["media_bytes_read"], 0)
+
+    def test_identical_bytes_and_origins_remain_uncertain(self):
+        entries = self.hash_entries()
+        entries["Photos from 2020/IMG_1194.JPG"] = entries["Photos from 2020/IMG_1194.HEIC"]
+        report = self.run_export(entries, "--hash-duplicate-media")
+        self.assertEqual(report["orphans"], [])
+        self.assertEqual(report["counts"]["uncertain"], 2)
+
+    def test_reencoded_album_copy_remains_uncertain(self):
+        entries = self.hash_entries()
+        entries["My Album/IMG_1194.HEIC"] = b"transcoded album rendition"
+        report = self.run_export(entries, "--hash-duplicate-media")
+        self.assertEqual(report["orphans"], [])
+        self.assertEqual(report["counts"]["uncertain"], 2)
+
+    def test_missing_album_media_remains_uncertain_without_other_evidence(self):
+        entries = self.hash_entries()
+        del entries["My Album/IMG_1194.HEIC"]
+        report = self.run_export(entries, "--hash-duplicate-media")
+        self.assertEqual(report["orphans"], [])
+        self.assertEqual(report["counts"]["uncertain"], 2)
+
+    def test_missing_library_media_stays_a_possible_member(self):
+        entries = self.hash_entries()
+        del entries["Photos from 2020/IMG_1194.JPG"]
+        report = self.run_export(entries, "--hash-duplicate-media")
+        self.assertEqual(report["orphans"], [])
+        self.assertEqual(report["counts"]["uncertain"], 2)
 
     def test_jpg_heic_duplicate_stills_get_separate_orphan_addresses(self):
         report = self.run_export(self.duplicate_entries())

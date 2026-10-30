@@ -1,5 +1,38 @@
 # Finder design and safety notes
 
+## 6.2.0: resolve album collisions using upload mechanism and optional hashes
+
+Distinct library identities also carry the upload mechanism extracted from
+`googlePhotosOrigin`. Known mechanisms include `mobileUpload`, `webUpload`,
+`picasa`, `driveSync`, `composition`, and `fromSharedAlbum`. Device type is not a
+separate mechanism. Unknown or absent origin data never disproves membership.
+
+Within a duplicate stem/time key, each album proof is matched to compatible
+library mechanisms. A copy can become an orphan only when every album proof has
+a possible library match and none can belong to that copy. A mobile upload can
+be filed just as a web upload can; no global preference is assigned to either.
+Contradictory metadata or media hints keep the duplicates UNCERTAIN.
+
+`--hash-duplicate-media` optionally narrows ambiguous choices using SHA-256.
+Size and ZIP CRC are hints for avoiding unnecessary reads, never positive proof
+of membership. Files are streamed read-only and not extracted. Default scans
+still decompress JSON only; JSON/media bytes and hash counts are reported
+separately. Equal ZIP hints across all choices retain ambiguity without reading
+their bytes.
+
+Every album-side sidecar is still membership evidence, including sidecars with
+no media. Missing media or a failed hash remains a possible match; an album
+rendition with no exact content match also retains the original ambiguity.
+These guards prevent a transcode or incomplete export from releasing an item
+that might be filed. Identical bytes may resolve via different upload mechanisms;
+identical bytes with identical mechanisms do not reveal which upload is filed.
+
+Both same-stem guard replays use the same duplicate-membership decisions, so the
+cross-check still isolates the window guard. Reports include per-item mechanism
+and evidence, and list duplicate decisions for both kept and withheld copies.
+This section supersedes the 6.1.0 rule that all album-matched duplicates must
+remain uncertain.
+
 ## 6.1.0: library identity is distinct from album membership
 
 Multiple Google Photos items can have the same filename stem and capture second,

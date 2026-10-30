@@ -5,6 +5,7 @@ import bisect
 import contextlib
 import csv
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -15,7 +16,7 @@ import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-TOOL_VERSION = "6.1.0"
+TOOL_VERSION = "6.2.0"
 
 # ---------------------------------------------------------------------------
 # Folder classification
@@ -81,6 +82,8 @@ PERMALINK_KEYS = ("url", "id", "photoId", "mediaItemId", "productUrl", "sourceUr
 NOT_A_PERMALINK_KEYS = ("googlePhotosOrigin",)
 # The sidecar field carried onto every output row.
 ITEM_URL_KEY = "url"
+UPLOAD_MECHANISMS = {"mobileUpload", "webUpload", "picasa", "composition",
+                     "fromSharedAlbum", "driveSync"}
 
 # Suffixes Google puts on media IT generated from your photos. Unlike album names,
 # this IS a reliable marker - but of an ITEM, not of an album. Used only to
@@ -311,6 +314,22 @@ def extract_url(data):
     return None
 
 
+def extract_upload_mechanism(data):
+    """The known Takeout upload mechanism, or None if absent/ambiguous.
+
+    Device type is deliberately excluded: phone and tablet uploads both use the
+    same mechanism. Unknown or malformed origin data must never disprove album
+    membership.
+    """
+    origin = data.get("googlePhotosOrigin") if isinstance(data, dict) else None
+    if not isinstance(origin, dict) or len(origin) != 1:
+        return None
+    mechanism = next(iter(origin))
+    if mechanism not in UPLOAD_MECHANISMS or not isinstance(origin[mechanism], dict):
+        return None
+    return mechanism
+
+
 def extract_ts(data):
     if not isinstance(data, dict):
         return None
@@ -436,12 +455,40 @@ class SourceBase(object):
         self.skipped_outside = 0
         self.enc_counts = Counter()
         self.bytes_read = 0
+        self.media_bytes_read = 0
+        self.media_files_hashed = 0
+        self._media_hashes = {}
         self.total_uncompressed = 0
         self.dup_skipped = 0
         self.warnings = []
 
     def close(self):
         pass
+
+    def hash_media(self, entry):
+        """Stream a requested media file for the optional duplicate resolver."""
+        if not is_media_filename(entry.name):
+            raise AssertionError("refusing to hash non-media: %s" % entry.relpath)
+        key = entry.relpath
+        if key in self._media_hashes:
+            return self._media_hashes[key]
+        digest = hashlib.sha256()
+        if self.kind == "zip":
+            stream = self.zf.open(entry.locator, "r")
+        elif self.kind == "dir":
+            stream = open(entry.locator, "rb")
+        else:
+            raise AssertionError("unsupported media source: %s" % self.kind)
+        with stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                self.media_bytes_read += len(chunk)
+                digest.update(chunk)
+        self.media_files_hashed += 1
+        self._media_hashes[key] = digest.hexdigest()
+        return self._media_hashes[key]
 
 
 def strip_photos_prefix(parts):
@@ -464,8 +511,8 @@ class ZipSource(SourceBase):
     """Reads a Takeout .zip without extracting it.
 
     Entries come from the central directory, which gives every media filename for
-    free. Only .json entries are ever decompressed - `read_json` refuses anything
-    else, so the 250GB of media cannot be touched even by accident.
+    free. Default scans decompress .json only: `read_json` refuses anything else.
+    The separate `hash_media` path is used only by the optional duplicate resolver.
     """
 
     def __init__(self, path):

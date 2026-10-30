@@ -409,12 +409,12 @@ class FileRec(object):
     __slots__ = ("relpath", "name", "scope", "folder", "sidecar_name", "data",
                  "method", "stem", "ext", "title_ext", "ts", "title", "url",
                  "name_may_be_truncated", "source", "sidecar_only", "no_sidecar",
-                 "rendition_shaped", "rendition_of", "fold_kind")
+                 "rendition_shaped", "rendition_of", "fold_kind", "entry")
 
     def __init__(self, relpath, name, scope, folder, sidecar_name, data, method,
                  source, sidecar_only=False, no_sidecar=False,
                  rendition_shaped=False, rendition_of=None, fold_kind=None,
-                 ext_override=None):
+                 ext_override=None, entry=None):
         self.relpath = relpath
         self.name = name
         self.scope = scope          # library | album | generated | archive
@@ -423,6 +423,7 @@ class FileRec(object):
         self.data = data
         self.method = method
         self.source = source
+        self.entry = entry
         self.sidecar_only = sidecar_only
         self.no_sidecar = no_sidecar
         self.rendition_shaped = rendition_shaped
@@ -558,7 +559,7 @@ def scan(folders, library_re, generated, fold_enabled=True, verbose=False):
 
         for me, jn, data, method in pairs:
             files.append(FileRec(me.relpath, me.name, scope, folder, jn, data,
-                                 method, me.source.label))
+                                 method, me.source.label, entry=me))
             pair_methods[method] += 1
             sidecar_total += 1
             url_present += note_sidecar(data)
@@ -570,7 +571,7 @@ def scan(folders, library_re, generated, fold_enabled=True, verbose=False):
             # another rendition of that one item, not an item of its own.
             files.append(FileRec(me.relpath, me.name, scope, folder, base_jn,
                                  base_data, "folded:" + fold_kind, me.source.label,
-                                 rendition_of=base_name, fold_kind=fold_kind))
+                                 rendition_of=base_name, fold_kind=fold_kind, entry=me))
             pair_methods["folded:" + fold_kind] += 1
             folded_counts[fold_kind] += 1
             if len(folded_examples) < 40:
@@ -581,7 +582,7 @@ def scan(folders, library_re, generated, fold_enabled=True, verbose=False):
         for me, shaped in unpaired_here:
             files.append(FileRec(me.relpath, me.name, scope, folder, None, None,
                                  "none", me.source.label, no_sidecar=True,
-                                 rendition_shaped=shaped))
+                                 rendition_shaped=shaped, entry=me))
             pair_methods["none"] += 1
             unpaired.append(me.relpath)
 

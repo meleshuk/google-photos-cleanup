@@ -132,12 +132,16 @@ def item_row(it, gen_folders_by_key, extra=()):
         "|".join(gen),
         "|".join(f.relpath for f in sorted(it.files, key=lambda f: f.relpath)),
         "|".join(sorted({f.source for f in it.files})),
+        it.upload_mechanism or "unknown",
+        (json.dumps(it.membership_resolution, sort_keys=True)
+         if it.membership_resolution else ""),
     ] + list(extra)
 
 
 ITEM_HEADER = ["title", "date", "taken_time_utc", "taken_time_epoch", "url",
                "live_photo_pair", "file_count", "extensions", "folded_renditions",
-               "generated_albums", "takeout_paths", "source_archives"]
+               "generated_albums", "takeout_paths", "source_archives",
+               "upload_mechanism", "duplicate_membership_resolution"]
 
 
 def item_dict(it, gen_folders_by_key, extra=None):
@@ -148,6 +152,8 @@ def item_dict(it, gen_folders_by_key, extra=None):
         "taken_time_utc": iso(it.ts),
         "taken_time_epoch": it.ts,
         "url": it.url,
+        "upload_mechanism": it.upload_mechanism,
+        "duplicate_membership_resolution": it.membership_resolution,
         "live_photo_pair": it.is_live_pair,
         "file_count": len(it.real_files),
         "extensions": sorted(it.exts),
@@ -183,7 +189,8 @@ def print_source_summary(sources, inv_info, part_warnings, elapsed):
         print("  %-34s %-5s %8d %8d %7d %7d  %d"
               % (s.label[:34], s.kind, s.entries, s.media, s.jsons, s.other, in_lib))
         for key in ("entries", "media", "jsons", "other", "dup_skipped",
-                    "skipped_outside", "bytes_read", "total_uncompressed"):
+                    "skipped_outside", "bytes_read", "total_uncompressed",
+                    "media_bytes_read", "media_files_hashed"):
             tot[key] += getattr(s, key)
     print("  %-34s %-5s %8d %8d %7d %7d"
           % ("TOTAL", "", tot["entries"], tot["media"], tot["jsons"], tot["other"]))
@@ -229,14 +236,21 @@ def print_source_summary(sources, inv_info, part_warnings, elapsed):
     print("    bytes READ (JSON sidecars only)                : %s"
           % human_bytes(tot["bytes_read"]))
     print("    bytes NOT read (media left compressed)         : %s"
-          % human_bytes(max(tot["total_uncompressed"] - tot["bytes_read"], 0)))
+          % human_bytes(max(tot["total_uncompressed"] - tot["bytes_read"]
+                            - tot["media_bytes_read"], 0)))
+    print("    media bytes READ for duplicate hashes           : %s"
+          % human_bytes(tot["media_bytes_read"]))
+    print("    media files hashed                              : %d"
+          % tot["media_files_hashed"])
     zbytes = sum(getattr(s, "archive_bytes", 0) for s in sources)
     if zbytes:
         print("    archive size on disk                           : %s"
               % human_bytes(zbytes))
     print("    elapsed                                        : %.1fs" % elapsed)
-    print("    => media entries are never decompressed; that is why this runs in")
-    print("       minutes against a 250GB export and needs no extra disk.")
+    if not tot["media_bytes_read"]:
+        print("    => media entries were not decompressed; no extra disk is needed.")
+    else:
+        print("    => selected duplicate media were streamed for hashing; no extraction.")
 
     if part_warnings:
         print("")
@@ -551,6 +565,10 @@ def main(argv=None):
                     help="DIAGNOSTIC: disable Rule 2, so every sidecar-less edit or "
                          "motion rendition becomes its own UNCERTAIN row instead of "
                          "joining its base item")
+    ap.add_argument("--hash-duplicate-media", action="store_true",
+                    help="stream selected ambiguous library/album media for SHA-256 "
+                         "comparison; default is metadata-only. Identical or missing "
+                         "media remain ambiguous unless upload mechanism resolves them")
     ap.add_argument("--verbose", action="store_true",
                     help="print per-folder pairing and folding detail as the scan runs")
     args = ap.parse_args(argv)
@@ -602,7 +620,9 @@ def main(argv=None):
 
     print("gphotos_find_orphans.py %s" % TOOL_VERSION)
     print("READ-ONLY scan. Nothing in the export is modified; archives are opened")
-    print('mode "r" and never rewritten. Only .json entries are ever decompressed.')
+    print('mode "r" and never rewritten.')
+    print("Duplicate media hashing: %s" % ("enabled" if args.hash_duplicate_media
+                                           else "disabled (JSON-only scan)"))
     print("No network access.\n")
     print("same-stem collision window           : %s%s"
           % (human_duration(stem_window),
@@ -647,13 +667,14 @@ def main(argv=None):
                        verbose=args.verbose)
         res = compute(scanres, args.include_archived, stem_window, stem_ext_window,
                       max_pairs_per_stem=args.collision_pairs_per_stem,
-                      examples_per_cell=args.collision_examples)
+                      examples_per_cell=args.collision_examples,
+                      hash_duplicate_media=args.hash_duplicate_media)
 
         source_warnings = []
         for s in sources:
             source_warnings.extend(s.warnings)
         all_warnings = (part_warnings + inv_info["warnings"] + source_warnings
-                        + scanres["errors"])
+                        + scanres["errors"] + res["evidence_warnings"])
 
         elapsed = time.time() - started
         print_source_summary(sources, inv_info, part_warnings, elapsed)
@@ -663,7 +684,10 @@ def main(argv=None):
             "entries": s.entries, "media": s.media, "json": s.jsons,
             "other": s.other, "duplicate_paths_skipped": s.dup_skipped,
             "entries_outside_library": s.skipped_outside,
-            "bytes_read": s.bytes_read,
+            "bytes_read": s.bytes_read + s.media_bytes_read,
+            "json_bytes_read": s.bytes_read,
+            "media_bytes_read": s.media_bytes_read,
+            "media_files_hashed": s.media_files_hashed,
             "bytes_uncompressed_total": s.total_uncompressed,
             "archive_bytes": getattr(s, "archive_bytes", None),
             "part_info": getattr(s, "part_info", None),
@@ -897,6 +921,10 @@ def main(argv=None):
               % identity_info["duplicate_membership_keys"])
         print("  duplicate items withheld due to album evidence          : %7d"
               % identity_info["duplicate_items_with_album_evidence"])
+        print("  duplicate orphans resolved by upload mechanism          : %7d"
+              % identity_info["orphan_duplicates_resolved_by_mechanism"])
+        print("  duplicate orphans resolved by SHA-256                    : %7d"
+              % identity_info["orphan_duplicates_resolved_by_sha256"])
         print("  REAL album logical items (distinct, across all albums)  : %7d" % n_alb)
         print("  generated-album logical items (confer no membership)    : %7d" % n_gen)
         print("  library items matched into a REAL album                 : %7d" % n_inalb)
@@ -1128,7 +1156,10 @@ def main(argv=None):
                 "media": sum(s.media for s in sources),
                 "json": sum(s.jsons for s in sources),
                 "other": sum(s.other for s in sources),
-                "bytes_read": sum(s.bytes_read for s in sources),
+                "bytes_read": sum(s.bytes_read + s.media_bytes_read for s in sources),
+                "json_bytes_read": sum(s.bytes_read for s in sources),
+                "media_bytes_read": sum(s.media_bytes_read for s in sources),
+                "media_files_hashed": sum(s.media_files_hashed for s in sources),
                 "bytes_uncompressed_total": sum(s.total_uncompressed for s in sources),
                 "entries_outside_library": sum(s.skipped_outside for s in sources),
                 "encoding_counts": {k: enc_tot[k] for k in
@@ -1146,6 +1177,7 @@ def main(argv=None):
                 "include_archived": args.include_archived,
                 "library_dir_regex": args.library_dir_regex,
                 "fold_renditions": fold_enabled,
+                "hash_duplicate_media": args.hash_duplicate_media,
                 "stem_collision_window_seconds": stem_window,
                 "stem_collision_window_ext_mismatch_seconds":
                     res["stem_guard_ext_window"],
@@ -1188,6 +1220,12 @@ def main(argv=None):
             },
             "rule_impact_before_after": ba,
             "identity_resolution": res["identity_resolution"],
+            "duplicate_membership_evidence": [
+                {"title": it.display_name, "url": it.url,
+                 "upload_mechanism": it.upload_mechanism,
+                 "resolution": it.membership_resolution}
+                for it in lib.values() if it.membership_resolution is not None
+            ],
             "stem_collision_delta_distribution": res["collision_deltas"],
             "stem_guard_crosscheck": res["stem_guard_crosscheck"],
             "uncertain_by_reason": dict(Counter(r for _i, r in res["uncertain"])),
@@ -1244,11 +1282,11 @@ def main(argv=None):
         print("  %s   (%d orphan rows, %d with a url, %d only because of "
               "generated albums)" % (out_csv, n_orp, n_url, n_genonly))
         print("  %s   (%d uncertain rows)" % (out_unc, n_unc))
-        print("\nRead %s from %d source(s) in %.1fs; media was never decompressed."
-              % (human_bytes(sum(s.bytes_read for s in sources)), len(sources),
+        print("\nRead %s from %d source(s) in %.1fs."
+              % (human_bytes(sum(s.bytes_read + s.media_bytes_read for s in sources)), len(sources),
                  elapsed))
-        print("\nDO NOT DELETE ANYTHING YET. Run the sanity checks in the header comment")
-        print("of this script (section 'HOW TO SANITY-CHECK') first - especially")
+        print("\nRun the sanity checks in docs/finder-design.md")
+        print("(section 'HOW TO SANITY-CHECK') first - especially")
         print("confirming every archive part is listed, that the album count matches")
         print("the Google Photos album picker, the STEM-COLLISION GUARD CROSS-CHECK")
         print("reading zero, and the 10-random-orphans spot check using each")

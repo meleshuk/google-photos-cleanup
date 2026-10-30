@@ -1,6 +1,7 @@
 """Logical Google Photos items and conservative orphan classification."""
 
 from .finder_inventory import *
+from .finder_evidence import resolve_duplicate_membership
 
 # ---------------------------------------------------------------------------
 # Logical items + set difference
@@ -10,16 +11,17 @@ class Item(object):
     """One Google Photos item: every file and membership proof that keys to it."""
 
     __slots__ = ("stem", "ts", "files", "folders", "identity", "duplicate_identity",
-                 "ambiguous_motion")
+                 "ambiguous_motion", "membership_resolution")
 
     def __init__(self, stem, ts):
         self.stem = stem
         self.ts = ts
         self.files = []
         self.folders = set()
-        self.identity = (stem, ts, None)
+        self.identity = (stem, ts, None, None)
         self.duplicate_identity = False
         self.ambiguous_motion = False
+        self.membership_resolution = None
 
     def add(self, rec):
         self.files.append(rec)
@@ -84,6 +86,11 @@ class Item(object):
         return None
 
     @property
+    def upload_mechanism(self):
+        mechanisms = {extract_upload_mechanism(f.data) for f in self.files}
+        return next(iter(mechanisms)) if len(mechanisms) == 1 else None
+
+    @property
     def where(self):
         """folder/filename of one representative file, for examples in the report."""
         f = (self.real_files or self.files)[0]
@@ -130,7 +137,9 @@ def _paired_motion_companions(left, right):
     b_name = os.path.splitext(nfc(b.name).lower())[0]
     a_created = ((a.data or {}).get("creationTime") or {}).get("timestamp")
     b_created = ((b.data or {}).get("creationTime") or {}).get("timestamp")
-    return (a.folder == b.folder and a_name == b_name
+    a_origin, b_origin = extract_upload_mechanism(a.data), extract_upload_mechanism(b.data)
+    return (not (a_origin and b_origin and a_origin != b_origin)
+            and a.folder == b.folder and a_name == b_name
             and a_created is not None and a_created == b_created)
 
 
@@ -187,7 +196,7 @@ def group_library_items(recs):
             discriminator = group.url
             if collision and discriminator is None:
                 discriminator = "unaddressed:" + group.files[0].relpath
-            group.identity = (group.stem, group.ts, discriminator)
+            group.identity = (group.stem, group.ts, group.upload_mechanism, discriminator)
             group.duplicate_identity = collision
             group.ambiguous_motion = collision and has_still and has_motion
             items[group.identity] = group
@@ -247,8 +256,13 @@ class LegacyStemGuard(object):
 
     def __init__(self, album_items):
         self.album_stems = {k[0] for k in album_items}
+        self.album_times = defaultdict(set)
+        for stem, ts in album_items:
+            self.album_times[stem].add(ts)
 
-    def verdict(self, _it, stem, _ts):
+    def verdict(self, _it, stem, _ts, ignore_exact=False):
+        if ignore_exact:
+            return REASON_STEM_DIFF_TS if self.album_times[stem] - {_ts} else None
         return REASON_STEM_DIFF_TS if stem in self.album_stems else None
 
 
@@ -280,13 +294,15 @@ class StemCollisionGuard(object):
         for (stem, ts), it in album_items.items():
             self.by_stem[stem].append((ts, frozenset(it.name_exts)))
 
-    def verdict(self, it, stem, ts):
+    def verdict(self, it, stem, ts, ignore_exact=False):
         candidates = self.by_stem.get(stem)
         if not candidates or self.window <= 0:
             return None
         lib_exts = frozenset(it.name_exts)
         weak = None
         for album_ts, album_exts in candidates:
+            if ignore_exact and album_ts == ts:
+                continue
             if album_ts is None or ts is None:
                 return REASON_STEM_ALBUM_NO_TS
             delta = abs(album_ts - ts)
@@ -418,7 +434,7 @@ def crosscheck_stem_guard(legacy, new):
 
 
 def classify_library(library_items, album_keys, archive_keys, include_archived,
-                     gen_folders_by_key, stem_guard):
+                     gen_folders_by_key, stem_guard, membership_decisions=None):
     """The funnel: every library item becomes in_album / orphan / uncertain /
     archived_excluded, biased so that anything doubtful is never an orphan.
 
@@ -434,13 +450,18 @@ def classify_library(library_items, album_keys, archive_keys, include_archived,
     for it in library_items.values():
         stem, ts = it.stem, it.ts
         key = (stem, ts)
+        decision = (membership_decisions or {}).get(it.identity)
         if it.duplicate_identity and key in album_keys:
-            uncertain.append((it, REASON_DUPLICATE_ALBUM_IDENTITY))
-            continue
+            if decision is None or decision["verdict"] == "uncertain":
+                uncertain.append((it, REASON_DUPLICATE_ALBUM_IDENTITY))
+                continue
+            if decision["verdict"] == "in_album":
+                in_album.append(it)
+                continue
         if it.ambiguous_motion:
             uncertain.append((it, REASON_AMBIGUOUS_MOTION_IDENTITY))
             continue
-        if key in album_keys:
+        if key in album_keys and not decision:
             in_album.append(it)
             continue
         if it.all_no_sidecar:
@@ -456,7 +477,7 @@ def classify_library(library_items, album_keys, archive_keys, include_archived,
         if ts is None:
             uncertain.append((it, REASON_NO_TAKEN_TIME))
             continue
-        collision = stem_guard.verdict(it, stem, ts)
+        collision = stem_guard.verdict(it, stem, ts, ignore_exact=bool(decision))
         if collision is not None:
             uncertain.append((it, collision))
             continue
@@ -519,7 +540,7 @@ def unfold(files):
 
 
 def compute(scanres, include_archived, stem_window, stem_ext_window,
-            max_pairs_per_stem=64, examples_per_cell=3):
+            max_pairs_per_stem=64, examples_per_cell=3, hash_duplicate_media=False):
     """Set difference against REAL albums only, plus the before/after diagnostics.
 
     Album membership comes from every album-side record - paired media AND lone
@@ -546,19 +567,27 @@ def compute(scanres, include_archived, stem_window, stem_ext_window,
         gen_folders_by_key[(r.stem, r.ts)].add(r.folder)
 
     guard = StemCollisionGuard(album_items, stem_window, stem_ext_window)
+    decisions, evidence_warnings = resolve_duplicate_membership(
+        library_items, album_items, hash_media=hash_duplicate_media)
+    for item in library_items.values():
+        item.membership_resolution = decisions.get(item.identity)
     res = classify_library(library_items, album_keys, archive_keys,
-                           include_archived, gen_folders_by_key, guard)
+                           include_archived, gen_folders_by_key, guard, decisions)
     # Rule 1 replay: membership from media+sidecar pairs only.
+    pair_decisions, _ = resolve_duplicate_membership(
+        library_items, album_items_pairs_only, hash_media=hash_duplicate_media)
     cf_rule1 = classify_library(library_items, album_keys_pairs_only,
                                 archive_keys, include_archived,
                                 gen_folders_by_key,
                                 StemCollisionGuard(album_items_pairs_only,
-                                                   stem_window, stem_ext_window))
+                                                   stem_window, stem_ext_window),
+                                pair_decisions)
     # 4.x replay: identical in every respect EXCEPT the same-stem guard, so the
-    # difference is attributable to the guard alone and nothing else.
+    # difference is attributable to the guard alone and nothing else. Both
+    # replays use the same validated duplicate-membership evidence.
     legacy = classify_library(library_items, album_keys, archive_keys,
                               include_archived, gen_folders_by_key,
-                              LegacyStemGuard(album_items))
+                              LegacyStemGuard(album_items), decisions)
 
     # Which library items are protected ONLY by a sidecar-only membership proof,
     # and which of those the old rule would actually have queued for deletion.
@@ -574,11 +603,14 @@ def compute(scanres, include_archived, stem_window, stem_ext_window,
     # Rule 2 replay: folding undone, so each rendition stands alone again.
     if folded_total:
         uf_album, _ug, uf_arch, uf_lib = assemble_items(unfold(files))
+        unfolded_decisions, _ = resolve_duplicate_membership(
+            uf_lib, uf_album, hash_media=hash_duplicate_media)
         cf_rule2 = classify_library(uf_lib, set(uf_album.keys()),
                                     set(uf_arch.keys()), include_archived,
                                     gen_folders_by_key,
                                     StemCollisionGuard(uf_album, stem_window,
-                                                       stem_ext_window))
+                                                       stem_ext_window),
+                                    unfolded_decisions)
         live_before = sum(1 for it in uf_lib.values() if it.is_live_pair)
         unc_before = len(cf_rule2["uncertain"])
         orph_before = len(cf_rule2["orphans"])
@@ -599,7 +631,16 @@ def compute(scanres, include_archived, stem_window, stem_ext_window,
             "ambiguous_motion_items": sum(
                 reason == REASON_AMBIGUOUS_MOTION_IDENTITY
                 for _it, reason in res["uncertain"]),
+            "orphan_duplicates_resolved_by_mechanism": sum(
+                it.membership_resolution is not None
+                and "upload_mechanism" in it.membership_resolution["methods"]
+                for it in res["orphans"]),
+            "orphan_duplicates_resolved_by_sha256": sum(
+                it.membership_resolution is not None
+                and "sha256" in it.membership_resolution["methods"]
+                for it in res["orphans"]),
         },
+        "evidence_warnings": evidence_warnings,
         "stem_guard_label": guard.label,
         "stem_guard_window": stem_window,
         "stem_guard_ext_window": guard.ext_window,

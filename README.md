@@ -26,12 +26,13 @@ album and, after human review, moving those items to Trash.
 The finder:
 
 - never accesses the network;
-- reads Takeout ZIP files directly without decompressing media;
+- reads Takeout ZIP metadata directly; optional hashing streams selected
+  ambiguous media without extracting files;
 - honors album sidecars even when Takeout omits the album's media copy;
 - preserves distinct library permalinks when still photos share a filename stem
   and capture timestamp;
-- holds duplicate items with album evidence for review because Takeout's album
-  permalinks cannot identify which duplicate is filed;
+- uses upload mechanism to distinguish duplicate library and album copies;
+- holds duplicates for review when album evidence cannot identify the member;
 - treats ambiguous items as `UNCERTAIN`, never as deletion candidates;
 - checks that its accounting reconciles before returning success.
 
@@ -92,6 +93,34 @@ This creates:
 
 You may also pass a directory containing all ZIP parts or an already extracted
 Takeout tree.
+
+### Duplicate uploads
+
+Library permalinks identify distinct items. Album-copy permalinks differ, so the
+finder matches membership using filename stem, capture timestamp, and upload
+mechanism from `googlePhotosOrigin`. A mobile upload is not inherently an orphan:
+the mechanism on the album copy determines which library copies remain possible
+members. Missing, conflicting, or unknown mechanisms preserve ambiguity.
+
+Reports include `upload_mechanism` and `duplicate_membership_resolution` so you
+can inspect why a duplicate was kept or released.
+
+For copies with the same mechanism, optionally compare exported media:
+
+```bash
+python3 gphotos_find_orphans.py \
+  ~/Downloads/takeout-*.zip \
+  --hash-duplicate-media \
+  -o ~/Desktop/orphans-refined.json
+```
+
+The default scan reads JSON only. With this flag, selected ambiguous media are
+streamed for SHA-256 comparison. An orphan is released only after every album
+proof has a possible library match and that copy is outside those matches.
+Identical media with the same upload mechanism remain ambiguous. Album sidecars
+with no accompanying media still prove membership and can resolve a duplicate by
+mechanism, but cannot be content-hashed. Re-encoded or unreadable files are not
+treated as evidence that a photo is absent from an album.
 
 Read the command's summary carefully. At minimum:
 
@@ -196,6 +225,7 @@ gphotos_cleanup/
   finder_sources.py              # Takeout paths, ZIP decoding, shared helpers
   finder_inventory.py            # global inventory, sidecars, folder scanning
   finder_matching.py             # logical items and orphan classification
+  finder_evidence.py             # upload mechanism and duplicate hash matching
   finder_reporting.py            # surveys, reports, finder CLI
   delete_shared.py               # input validation, models, durable journal
   delete_browser.py              # browser state and click guardrails
