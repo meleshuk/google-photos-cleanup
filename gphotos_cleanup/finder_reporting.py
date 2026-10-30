@@ -673,7 +673,7 @@ def main(argv=None):
 
         lib = res["library_items"]
         orphans = res["orphans"]
-        orphan_keys = set((it.stem, it.ts) for it in orphans)
+        orphan_keys = {it.identity for it in orphans}
         gen_map = res["gen_folders_by_key"]
 
         print_rule_impact(res, scanres, fold_enabled)
@@ -892,6 +892,11 @@ def main(argv=None):
         print("        and an edited rendition counts as part of its base item)")
         print("=" * 78)
         print("  library logical items (chronological folders + archive) : %7d" % n_lib)
+        identity_info = res["identity_resolution"]
+        print("  repeated stem/time keys split by library permalink      : %7d"
+              % identity_info["duplicate_membership_keys"])
+        print("  duplicate items withheld due to album evidence          : %7d"
+              % identity_info["duplicate_items_with_album_evidence"])
         print("  REAL album logical items (distinct, across all albums)  : %7d" % n_alb)
         print("  generated-album logical items (confer no membership)    : %7d" % n_gen)
         print("  library items matched into a REAL album                 : %7d" % n_inalb)
@@ -1182,6 +1187,7 @@ def main(argv=None):
                     res["stem_guard_crosscheck"]["violations"],
             },
             "rule_impact_before_after": ba,
+            "identity_resolution": res["identity_resolution"],
             "stem_collision_delta_distribution": res["collision_deltas"],
             "stem_guard_crosscheck": res["stem_guard_crosscheck"],
             "uncertain_by_reason": dict(Counter(r for _i, r in res["uncertain"])),

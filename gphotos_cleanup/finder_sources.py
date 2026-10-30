@@ -15,7 +15,7 @@ import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-TOOL_VERSION = "6.0.0"
+TOOL_VERSION = "6.1.0"
 
 # ---------------------------------------------------------------------------
 # Folder classification
@@ -126,6 +126,12 @@ REASON_MEDIA_NO_SIDECAR = (
 REASON_LIB_SIDECAR_ONLY = (
     "sidecar in a library/Archive folder with no media file anywhere in the export")
 REASON_NO_TAKEN_TIME = "sidecar has no photoTakenTime; cannot key reliably"
+REASON_DUPLICATE_ALBUM_IDENTITY = (
+    "distinct library items share a title stem and capture timestamp with album "
+    "evidence; cannot determine which duplicate belongs to the album")
+REASON_AMBIGUOUS_MOTION_IDENTITY = (
+    "distinct still and video URLs share a title stem and capture timestamp "
+    "without enough evidence to identify a Live Photo companion")
 # 4.x's same-stem guard. Kept verbatim because the whole classification is replayed
 # with it on every run as a cross-check; it is never used to classify a reported row.
 REASON_STEM_DIFF_TS = (

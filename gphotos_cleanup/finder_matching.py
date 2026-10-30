@@ -9,13 +9,17 @@ from .finder_inventory import *
 class Item(object):
     """One Google Photos item: every file and membership proof that keys to it."""
 
-    __slots__ = ("stem", "ts", "files", "folders")
+    __slots__ = ("stem", "ts", "files", "folders", "identity", "duplicate_identity",
+                 "ambiguous_motion")
 
     def __init__(self, stem, ts):
         self.stem = stem
         self.ts = ts
         self.files = []
         self.folders = set()
+        self.identity = (stem, ts, None)
+        self.duplicate_identity = False
+        self.ambiguous_motion = False
 
     def add(self, rec):
         self.files.append(rec)
@@ -102,6 +106,91 @@ def group_items(recs):
         if it is None:
             it = items[key] = Item(r.stem, r.ts)
         it.add(r)
+    return items
+
+
+def _paired_motion_companions(left, right):
+    """Recognize two keyed halves using file names and upload metadata.
+
+    Folded companions already inherit their base's URL. Two independent sidecars
+    need stronger evidence than just the same title stem and capture second.
+    """
+    left_base = [f for f in left.files if not f.fold_kind]
+    right_base = [f for f in right.files if not f.fold_kind]
+    if len(left_base) != 1 or len(right_base) != 1:
+        return False
+    a, b = left_base[0], right_base[0]
+    if a.sidecar_only or b.sidecar_only:
+        return False
+    if not ((a.ext in IMAGE_EXTS and b.ext in VIDEO_EXTS)
+            or (b.ext in IMAGE_EXTS and a.ext in VIDEO_EXTS)):
+        return False
+    # Keep Takeout's numeric dedup suffix here: IMG_1(1) is not IMG_1.
+    a_name = os.path.splitext(nfc(a.name).lower())[0]
+    b_name = os.path.splitext(nfc(b.name).lower())[0]
+    a_created = ((a.data or {}).get("creationTime") or {}).get("timestamp")
+    b_created = ((b.data or {}).get("creationTime") or {}).get("timestamp")
+    return (a.folder == b.folder and a_name == b_name
+            and a_created is not None and a_created == b_created)
+
+
+def group_library_items(recs):
+    """Preserve library addresses while using stem/time only for membership.
+
+    Multiple still images can share the original name and capture second. Their
+    distinct library URLs must survive into separate output rows. Album URLs are
+    per-copy and cannot decide which duplicate is filed, so those collisions are
+    marked for conservative classification.
+    """
+    items = {}
+    for aggregate in group_items(recs).values():
+        by_address = {}
+        for rec in aggregate.files:
+            address = rec.url or ("unaddressed:" + rec.relpath)
+            if address not in by_address:
+                by_address[address] = Item(rec.stem, rec.ts)
+            by_address[address].add(rec)
+        groups = list(by_address.values())
+        # With no permalink evidence, retain the conservative legacy grouping.
+        urls = {f.url for f in aggregate.files if f.url}
+        if len(groups) == 1 or not urls:
+            groups = [aggregate]
+        else:
+            # Merge only unambiguous one-to-one still/motion companions.
+            partners = {
+                i: [j for j, other in enumerate(groups) if j != i
+                    and _paired_motion_companions(group, other)]
+                for i, group in enumerate(groups)
+            }
+            merged, consumed = [], set()
+            for i, group in enumerate(groups):
+                if i in consumed:
+                    continue
+                candidates = partners[i]
+                if len(candidates) == 1 and partners[candidates[0]] == [i]:
+                    j = candidates[0]
+                    other = groups[j]
+                    # Prefer the still's permalink as the Live Photo address.
+                    if other.exts & IMAGE_EXTS:
+                        group, other = other, group
+                    for rec in other.files:
+                        group.add(rec)
+                    consumed.add(j)
+                consumed.add(i)
+                merged.append(group)
+            groups = merged
+        collision = len(groups) > 1
+        has_still = any(group.name_exts & IMAGE_EXTS for group in groups)
+        has_motion = any(group.name_exts & VIDEO_EXTS and not group.is_live_pair
+                         for group in groups)
+        for group in groups:
+            discriminator = group.url
+            if collision and discriminator is None:
+                discriminator = "unaddressed:" + group.files[0].relpath
+            group.identity = (group.stem, group.ts, discriminator)
+            group.duplicate_identity = collision
+            group.ambiguous_motion = collision and has_still and has_motion
+            items[group.identity] = group
     return items
 
 
@@ -226,7 +315,8 @@ def stem_collision_deltas(library_items, album_items, max_pairs_per_stem,
     for (stem, ts), it in album_items.items():
         album_by_stem[stem].append((ts, it))
     lib_by_stem = defaultdict(list)
-    for (stem, ts), it in library_items.items():
+    for it in library_items.values():
+        stem, ts = it.stem, it.ts
         if stem in album_by_stem:
             lib_by_stem[stem].append((ts, it))
 
@@ -296,20 +386,20 @@ def crosscheck_stem_guard(legacy, new):
     large, so it is reported as an intended delta rather than as a violation.
     """
     def keys(items):
-        return {(it.stem, it.ts) for it in items}
+        return {it.identity for it in items}
 
     legacy_filed = keys(legacy["in_album"])
     legacy_orphan = keys(legacy["orphans"])
-    legacy_uncertain = {(it.stem, it.ts) for it, _r in legacy["uncertain"]}
-    new_orphan_items = {(it.stem, it.ts): it for it in new["orphans"]}
+    legacy_uncertain = {it.identity for it, _r in legacy["uncertain"]}
+    new_orphan_items = {it.identity: it for it in new["orphans"]}
     new_orphan = set(new_orphan_items)
-    new_uncertain = {(it.stem, it.ts): r for it, r in new["uncertain"]}
+    new_uncertain = {it.identity: r for it, r in new["uncertain"]}
 
-    filed_now_orphan = sorted(legacy_filed & new_orphan)
-    orphan_now_held = sorted(legacy_orphan & set(new_uncertain))
+    filed_now_orphan = sorted(legacy_filed & new_orphan, key=repr)
+    orphan_now_held = sorted(legacy_orphan & set(new_uncertain), key=repr)
     released = sorted(legacy_uncertain & new_orphan,
                       key=lambda k: (-(k[1] or 0), k[0]))
-    legacy_reason = {(it.stem, it.ts): r for it, r in legacy["uncertain"]}
+    legacy_reason = {it.identity: r for it, r in legacy["uncertain"]}
     return {
         "legacy_guard": LegacyStemGuard.label,
         "legacy_filed_now_orphan": len(filed_now_orphan),
@@ -341,8 +431,15 @@ def classify_library(library_items, album_keys, archive_keys, include_archived,
     orphans, uncertain, in_album, archived_excluded = [], [], [], []
     generated_only = []
 
-    for key, it in library_items.items():
-        stem, ts = key
+    for it in library_items.values():
+        stem, ts = it.stem, it.ts
+        key = (stem, ts)
+        if it.duplicate_identity and key in album_keys:
+            uncertain.append((it, REASON_DUPLICATE_ALBUM_IDENTITY))
+            continue
+        if it.ambiguous_motion:
+            uncertain.append((it, REASON_AMBIGUOUS_MOTION_IDENTITY))
+            continue
         if key in album_keys:
             in_album.append(it)
             continue
@@ -386,14 +483,18 @@ def assemble_items(files):
 
     Archive-only items are not in "Photos from YYYY" but are still library items,
     so they are merged into the library view.
+    Album keys represent membership evidence; library keys also carry their
+    address discriminator so distinct items cannot disappear from the output.
     """
     album_items = group_items([f for f in files if f.scope == "album"])
     gen_items = group_items([f for f in files if f.scope == "generated"])
     archive_items = group_items([f for f in files if f.scope == "archive"])
-    library_items = group_items([f for f in files if f.scope == "library"])
+    library_items = group_library_items([f for f in files if f.scope == "library"])
+    library_keys = {(it.stem, it.ts) for it in library_items.values()}
     for key, it in archive_items.items():
-        if key not in library_items:
-            library_items[key] = it
+        if key not in library_keys:
+            for identity, archive_it in group_library_items(it.files).items():
+                library_items[identity] = archive_it
     return album_items, gen_items, archive_items, library_items
 
 
@@ -486,12 +587,25 @@ def compute(scanres, include_archived, stem_window, stem_ext_window,
         orph_before = len(res["orphans"])
 
     res.update({
+        "identity_resolution": {
+            "library_membership_keys": len({(it.stem, it.ts)
+                                            for it in library_items.values()}),
+            "library_items": len(library_items),
+            "duplicate_membership_keys": len({(it.stem, it.ts)
+                for it in library_items.values() if it.duplicate_identity}),
+            "duplicate_items_with_album_evidence": sum(
+                reason == REASON_DUPLICATE_ALBUM_IDENTITY
+                for _it, reason in res["uncertain"]),
+            "ambiguous_motion_items": sum(
+                reason == REASON_AMBIGUOUS_MOTION_IDENTITY
+                for _it, reason in res["uncertain"]),
+        },
         "stem_guard_label": guard.label,
         "stem_guard_window": stem_window,
         "stem_guard_ext_window": guard.ext_window,
         "stem_guard_crosscheck": crosscheck_stem_guard(legacy, res),
         "legacy_orphans": len(legacy["orphans"]),
-        "legacy_orphan_keys": {(it.stem, it.ts) for it in legacy["orphans"]},
+        "legacy_orphan_keys": {it.identity for it in legacy["orphans"]},
         "legacy_uncertain": len(legacy["uncertain"]),
         "legacy_uncertain_by_reason": dict(
             Counter(r for _i, r in legacy["uncertain"])),
@@ -536,7 +650,7 @@ def contiguous_runs(library_items, orphan_keys):
                      key=lambda i: (-i.ts, i.stem))
     runs, cur = [], []
     for it in ordered:
-        if (it.stem, it.ts) in orphan_keys:
+        if it.identity in orphan_keys:
             cur.append(it)
         elif cur:
             runs.append(cur)

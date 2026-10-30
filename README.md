@@ -28,6 +28,10 @@ The finder:
 - never accesses the network;
 - reads Takeout ZIP files directly without decompressing media;
 - honors album sidecars even when Takeout omits the album's media copy;
+- preserves distinct library permalinks when still photos share a filename stem
+  and capture timestamp;
+- holds duplicate items with album evidence for review because Takeout's album
+  permalinks cannot identify which duplicate is filed;
 - treats ambiguous items as `UNCERTAIN`, never as deletion candidates;
 - checks that its accounting reconciles before returning success.
 
@@ -99,7 +103,7 @@ Read the command's summary carefully. At minimum:
 5. Pick items from several real albums and confirm they are absent from the
    orphan report.
 
-The script's opening documentation contains the complete validation checklist
+The [finder design notes](docs/finder-design.md) contain the validation checklist
 and explains generated-album flags, archived items, filename collisions, Live
 Photos, edited renditions, and Takeout sidecar behavior.
 
@@ -170,7 +174,8 @@ large-run confirmation, exit codes, and recovery guidance.
 
 ## Tests
 
-The finder has a synthetic end-to-end Takeout test. The deleter includes 99
+The finder has synthetic end-to-end Takeout tests covering duplicate stills,
+album ambiguity, transcodes, and Live Photo companions. The deleter includes 99
 offline guardrail and regression tests that never open a browser or network
 connection.
 

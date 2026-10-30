@@ -1,5 +1,33 @@
 # Finder design and safety notes
 
+## 6.1.0: library identity is distinct from album membership
+
+Multiple Google Photos items can have the same filename stem and capture second,
+including JPG/HEIC copies or repeated uploads with identical sidecar titles.
+The `(title stem, photoTakenTime)` key remains useful for matching album copies,
+but is insufficient to identify library items. Library records are now grouped
+by their own sidecar permalink within that membership key. Distinct library
+permalinks produce separate rows.
+
+Album-side URLs remain per-copy and must never be compared directly to library
+URLs to infer membership. If multiple library items share a membership key and
+an album proves that key, every ambiguous duplicate is reported as UNCERTAIN.
+When no album proof or collision guard applies, each duplicate with its own
+media evidence can become an orphan.
+
+Files folded into a rendition keep their base URL. Two independently keyed
+still/motion halves are joined only when there is a unique companion, their
+actual filename stems (including numeric dedup suffixes) and folder agree, and
+their sidecars give the same creation timestamp. Otherwise an ambiguous mixture
+of still and video URLs is held UNCERTAIN. Single-URL transcodes remain one item.
+
+The diagnostics and range accounting use distinct library identities. The
+following notes retain the history and rationale of the 6.0.0 implementation;
+this section supersedes its claim that stem and capture time alone identify one
+library item.
+
+## 6.0.0 design history
+
 gphotos_find_orphans.py 6.0.0 - find Google Photos items in the library but in NO album.
 
 WHY THIS EXISTS
